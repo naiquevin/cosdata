@@ -51,7 +51,7 @@ async fn index_manual(body: web::Bytes) -> Result<HttpResponse, Error> {
 pub async fn run_actix_server() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
-    let config = load_rustls_config();
+    // let config = load_rustls_config();
 
     let config_data = Data::new(load_config());
 
@@ -117,7 +117,9 @@ pub async fn run_actix_server() -> std::io::Result<()> {
         // .service(web::resource("/manual").route(web::post().to(index_manual)))
         // .service(web::resource("/").route(web::post().to(index)))
     })
-    .bind_rustls_0_23(format!("{}:{}", config_data.server.host, config_data.server.port), config)?
+    .bind((config_data.server.host.as_str(), config_data.server.port))
+    .unwrap()
+    // .bind_rustls_0_23(format!("{}:{}", config_data.server.host, config_data.server.port), config)?
     .run()
     .await
 }
