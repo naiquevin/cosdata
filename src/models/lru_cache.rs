@@ -21,11 +21,11 @@ fn counter_age(global_value: u32, item_value: u32) -> u32 {
     }
 }
 
-pub struct EvictionIndex {
+pub struct KeyIndex {
     inner: [AtomicU64; 256],
 }
 
-impl EvictionIndex {
+impl KeyIndex {
     fn new() -> Self {
         Self {
             // @NOTE: Uses inline constants; will only work for msrv =
@@ -137,7 +137,7 @@ where
     // Global counter
     counter: AtomicU32,
     evict_strategy: EvictStrategy,
-    index: EvictionIndex,
+    index: Option<KeyIndex>,
     evict_hook: Option<fn(&V)>,
 }
 
@@ -164,11 +164,15 @@ where
     V: Clone,
 {
     pub fn new(capacity: usize, evict_strategy: EvictStrategy) -> Self {
+        let index = match evict_strategy {
+            EvictStrategy::Immediate => None,
+            EvictStrategy::Probabilistic(_) => Some(KeyIndex::new()),
+        };
         LRUCache {
             map: DashMap::new(),
             counter: AtomicU32::new(0),
-            index: EvictionIndex::new(),
             evict_hook: None,
+            index,
             capacity,
             evict_strategy,
         }
@@ -193,8 +197,13 @@ where
             let old_counter = *counter_val;
             let new_counter = self.increment_counter();
             *counter_val = new_counter;
-            self.index
-                .on_cache_hit(old_counter, new_counter, key.clone().into());
+            if let Some(index) = &self.index {
+                index.on_cache_hit(
+                    old_counter,
+                    new_counter,
+                    key.clone().into()
+                );
+            }
             Some(value.clone())
         } else {
             None
@@ -208,7 +217,9 @@ where
     pub fn insert(&self, key: K, value: V) {
         let counter = self.increment_counter();
         self.map.insert(key.clone(), (value, counter));
-        self.index.on_cache_miss(counter, key.into());
+        if let Some(index) = &self.index {
+            index.on_cache_miss(counter, key.into());
+        }
         self.evict();
     }
 
@@ -229,13 +240,17 @@ where
             .and_modify(|(_, counter)| {
                 let old_counter = counter.clone();
                 let new_counter = self.increment_counter();
-                self.index.on_cache_hit(old_counter, new_counter, k1.into());
+                if let Some(index) = &self.index {
+                    index.on_cache_hit(old_counter, new_counter, k1.into());
+                }
                 *counter = new_counter;
             })
             .or_try_insert_with(|| {
                 inserted = true;
                 let counter = self.increment_counter();
-                self.index.on_cache_miss(counter, k2.into());
+                if let Some(index) = &self.index {
+                    index.on_cache_miss(counter, k2.into());
+                }
                 f().map(|v| (v, counter))
             })
             .map(|v| v.0.clone());
@@ -301,8 +316,12 @@ where
         if num_to_evict > 0 {
             let global_counter = self.counter.load(Ordering::SeqCst);
             let mut pairs_to_evict = Vec::with_capacity(num_to_evict as usize);
+            // @NOTE: Safe use of unwrap as we are ensuring that the
+            // key index is enabled in case of prob eviction strategy
+            // (See the `new` method).
+            let index = self.index.as_ref().unwrap();
             // @TODO: What if num_to_evict is > 256?
-            for (idx, key) in self.index.get_keys(num_to_evict as u8) {
+            for (idx, key) in index.get_keys(num_to_evict as u8) {
                 if pairs_to_evict.len() as u8 >= num_to_evict {
                     break;
                 }
@@ -326,7 +345,7 @@ where
                     evict_hook(&value)
                 }
                 self.map.remove(&key);
-                self.index.remove(idx);
+                index.remove(idx);
             }
         }
     }
@@ -583,8 +602,8 @@ mod tests {
     }
 
     #[test]
-    fn test_eviction_index() {
-        let index: EvictionIndex = EvictionIndex::new();
+    fn test_key_index() {
+        let index: KeyIndex = KeyIndex::new();
 
         let mut global_counter = 0;
 
