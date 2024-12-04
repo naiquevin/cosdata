@@ -266,7 +266,12 @@ impl ProbCache {
         prop_file: Arc<RwLock<File>>,
     ) -> Self {
         let cuckoo_filter = CuckooFilter::new(cuckoo_filter_capacity);
-        let registry = LRUCache::with_prob_eviction(1_000_000, 0.03125);
+        let mut registry = LRUCache::with_prob_eviction(1_000_000, 0.03125);
+        registry.set_evict_hook(Some(|item: &SharedNode| {
+            let file_index = item.get_file_index().unwrap();
+            let new_state = ProbLazyItemState::Pending { file_index };
+            item.set_state(new_state);
+        }));
         let props_registry = DashMap::new();
 
         Self {
