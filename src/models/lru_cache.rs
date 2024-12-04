@@ -83,7 +83,7 @@ impl KeyIndex {
     }
 }
 
-pub struct ProbEviction {
+pub struct ProbStrategy {
     // Probability of eviction per call. E.g. A value of 0.1 means
     // eviction will be randomly triggered with 10% probability on each call
     prob: f16,
@@ -92,7 +92,7 @@ pub struct ProbEviction {
     lambda: f16,
 }
 
-impl ProbEviction {
+impl ProbStrategy {
     pub fn new(prob: f16) -> Self {
         Self {
             prob,
@@ -118,12 +118,12 @@ impl ProbEviction {
 }
 
 #[allow(unused)]
-pub enum EvictStrategy {
+pub enum EvictionStrategy {
     // Eviction will happen immediately after insertion
     Immediate,
     // All extra items will be evicted together at a probabilistically
     // calculated frequency
-    Probabilistic(ProbEviction),
+    Probabilistic(ProbStrategy),
 }
 
 pub struct LRUCache<K, V>
@@ -136,7 +136,7 @@ where
     capacity: usize,
     // Global counter
     counter: AtomicU32,
-    evict_strategy: EvictStrategy,
+    evict_strategy: EvictionStrategy,
     index: Option<KeyIndex>,
     evict_hook: Option<fn(&V)>,
 }
@@ -163,10 +163,10 @@ where
     K: Eq + std::hash::Hash + Clone + Into<u64> + From<u64>,
     V: Clone,
 {
-    pub fn new(capacity: usize, evict_strategy: EvictStrategy) -> Self {
+    pub fn new(capacity: usize, evict_strategy: EvictionStrategy) -> Self {
         let index = match evict_strategy {
-            EvictStrategy::Immediate => None,
-            EvictStrategy::Probabilistic(_) => Some(KeyIndex::new()),
+            EvictionStrategy::Immediate => None,
+            EvictionStrategy::Probabilistic(_) => Some(KeyIndex::new()),
         };
         LRUCache {
             map: DashMap::new(),
@@ -180,7 +180,7 @@ where
 
     // Constructs a new LRUCache with probabilistic eviction strategy
     pub fn with_prob_eviction(capacity: usize, prob: f32) -> Self {
-        let strategy = EvictStrategy::Probabilistic(ProbEviction::new(f16::from_f32_const(prob)));
+        let strategy = EvictionStrategy::Probabilistic(ProbStrategy::new(f16::from_f32_const(prob)));
         Self::new(capacity, strategy)
     }
 
@@ -273,8 +273,8 @@ where
     fn evict(&self) {
         if self.map.len() > self.capacity {
             match &self.evict_strategy {
-                EvictStrategy::Immediate => self.evict_lru(),
-                EvictStrategy::Probabilistic(prob) => {
+                EvictionStrategy::Immediate => self.evict_lru(),
+                EvictionStrategy::Probabilistic(prob) => {
                     if self.map.len() > self.capacity && prob.should_trigger() {
                         self.evict_lru_probabilistic(&prob);
                     }
@@ -311,7 +311,7 @@ where
         }
     }
 
-    fn evict_lru_probabilistic(&self, strategy: &ProbEviction) {
+    fn evict_lru_probabilistic(&self, strategy: &ProbStrategy) {
         let num_to_evict = (1.0_f32 / strategy.prob.to_f32()) as u8;
         if num_to_evict > 0 {
             let global_counter = self.counter.load(Ordering::SeqCst);
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_basic_usage() {
-        let cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictStrategy::Immediate);
+        let cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionStrategy::Immediate);
 
         cache.insert(1, "value1");
         cache.insert(2, "value2");
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_get_or_insert() {
-        let cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictStrategy::Immediate);
+        let cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionStrategy::Immediate);
 
         // Insert two values using `try_insert_with`, verifying that
         // the method returns the correct value
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_conc_get_or_insert() {
-        let inner: LRUCache<u64, &'static str> = LRUCache::new(2, EvictStrategy::Immediate);
+        let inner: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionStrategy::Immediate);
         let cache = Arc::new(inner);
 
         // Try concurrently inserting the same entry from 2 threads
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_values_iterator() {
-        let cache: LRUCache<u64, &'static str> = LRUCache::new(4, EvictStrategy::Immediate);
+        let cache: LRUCache<u64, &'static str> = LRUCache::new(4, EvictionStrategy::Immediate);
 
         cache.insert(1, "value1");
         cache.insert(2, "value2");
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_eviction_probability() {
-        let prob = ProbEviction::new(f16::from_f32_const(0.03125));
+        let prob = ProbStrategy::new(f16::from_f32_const(0.03125));
 
         // Without wraparound
         let global_counter = 1000;
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_evict_hook() {
-        let mut cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictStrategy::Immediate);
+        let mut cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionStrategy::Immediate);
         cache.set_evict_hook(Some(|&value| {
             assert_eq!("value2", value);
         }));
