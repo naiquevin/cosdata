@@ -135,16 +135,14 @@ enum EvictionTrigger {
     // `prob` indicates probability of eviction getting
     // triggered. E.g. A value of 0.1 means eviction will be randomly
     // triggered with 10% probability on each call
-    Probabilistic { prob: f16 }
+    Probabilistic { prob: f16 },
 }
 
 impl EvictionTrigger {
     fn should_trigger(&self) -> bool {
         match self {
             Self::Always => true,
-            Self::Probabilistic { prob } => {
-                *prob > f16::from_f32(rand::thread_rng().gen())
-            },
+            Self::Probabilistic { prob } => *prob > f16::from_f32(rand::thread_rng().gen()),
         }
     }
 }
@@ -226,19 +224,13 @@ where
         };
         // @NOTE: Code for backward compatibility
         let eviction_kind = match evict_strategy.clone() {
-            EvictionStrategy::Deterministic => {
-                EvictionKind::Foreground {
-                    strategy: evict_strategy,
-                    trigger: EvictionTrigger::Always,
-                }
-            }
-            EvictionStrategy::Probabilistic(strat) => {
-                EvictionKind::Foreground {
-                    strategy: evict_strategy,
-                    trigger: EvictionTrigger::Probabilistic {
-                        prob: strat.prob,
-                    }
-                }
+            EvictionStrategy::Deterministic => EvictionKind::Foreground {
+                strategy: evict_strategy,
+                trigger: EvictionTrigger::Always,
+            },
+            EvictionStrategy::Probabilistic(strat) => EvictionKind::Foreground {
+                strategy: evict_strategy,
+                trigger: EvictionTrigger::Probabilistic { prob: strat.prob },
             },
         };
         let obj = LRUCache {
@@ -257,7 +249,8 @@ where
 
     // Constructs a new LRUCache with probabilistic eviction strategy
     pub fn with_prob_eviction(capacity: usize, prob: f32) -> Self {
-        let strategy = EvictionStrategy::Probabilistic(ProbStrategy::new(f16::from_f32_const(prob)));
+        let strategy =
+            EvictionStrategy::Probabilistic(ProbStrategy::new(f16::from_f32_const(prob)));
         Self::new(capacity, strategy)
     }
 
@@ -275,11 +268,7 @@ where
             let new_counter = self.increment_counter();
             *counter_val = new_counter;
             if let Some(index) = &self.index {
-                index.on_cache_hit(
-                    old_counter,
-                    new_counter,
-                    key.clone().into()
-                );
+                index.on_cache_hit(old_counter, new_counter, key.clone().into());
             }
             Some(value.clone())
         } else {
@@ -356,24 +345,27 @@ where
         if self.map.len() > self.capacity {
             match &self.eviction_kind {
                 EvictionKind::Foreground { strategy, trigger } => {
-                    match (strategy, trigger)  {
+                    match (strategy, trigger) {
                         (EvictionStrategy::Deterministic, EvictionTrigger::Always) => {
                             self.evict_oldest()
-                        },
-                        (EvictionStrategy::Probabilistic(prob_strat), EvictionTrigger::Probabilistic { prob }) => {
+                        }
+                        (
+                            EvictionStrategy::Probabilistic(prob_strat),
+                            EvictionTrigger::Probabilistic { prob },
+                        ) => {
                             if trigger.should_trigger() {
                                 self.evict_fg_probabilistic(prob_strat, prob)
                             }
-                        },
+                        }
                         // Rest of the cases are not supported
                         //
                         // 1. Deterministic strategy + Probabilistic
                         //    trigger
                         // 2. Probabilistic strategy + Always trigger
                         //    (doesn't make sense)
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     }
-                },
+                }
                 _ => unreachable!(),
             }
         }
@@ -456,13 +448,16 @@ where
             thread::spawn(move || {
                 // Ensure that eviction kind is background and strategy is probabilistic
                 let (strat, max_batch_size, interval, lock) = match &this.eviction_kind {
-                    EvictionKind::Background { strategy, max_batch_size, interval, lock } => {
-                        match strategy {
-                            EvictionStrategy::Probabilistic(prob_strat) => {
-                                (prob_strat, max_batch_size, interval, lock)
-                            },
-                            _ => unreachable!(),
+                    EvictionKind::Background {
+                        strategy,
+                        max_batch_size,
+                        interval,
+                        lock,
+                    } => match strategy {
+                        EvictionStrategy::Probabilistic(prob_strat) => {
+                            (prob_strat, max_batch_size, interval, lock)
                         }
+                        _ => unreachable!(),
                     },
                     _ => unreachable!(),
                 };
@@ -854,7 +849,8 @@ mod tests {
 
     #[test]
     fn test_evict_hook() {
-        let mut cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionStrategy::Deterministic);
+        let mut cache: LRUCache<u64, &'static str> =
+            LRUCache::new(2, EvictionStrategy::Deterministic);
         cache.set_evict_hook(Some(|&value| {
             assert_eq!("value2", value);
         }));
