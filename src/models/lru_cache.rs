@@ -88,18 +88,14 @@ impl KeyIndex {
 
 #[derive(Clone)]
 pub struct ProbStrategy {
-    // Probability of eviction per call. E.g. A value of 0.1 means
-    // eviction will be randomly triggered with 10% probability on each call
-    prob: f16,
     // Parameter to tune the "aggressiveness" of eviction i.e. higher
     // value means more aggressive
     lambda: f16,
 }
 
 impl ProbStrategy {
-    pub fn new(prob: f16) -> Self {
+    pub fn new() -> Self {
         Self {
-            prob,
             lambda: f16::from_f32_const(0.01),
         }
     }
@@ -259,7 +255,7 @@ where
     pub fn with_prob_eviction(capacity: usize, prob: f32) -> Self {
         let trigger_prob = f16::from_f32_const(prob);
         let eviction_kind = EvictionKind::Foreground {
-            strategy: EvictionStrategy::Probabilistic(ProbStrategy::new(trigger_prob)),
+            strategy: EvictionStrategy::Probabilistic(ProbStrategy::new()),
             trigger: EvictionTrigger::Probabilistic {
                 prob: trigger_prob,
             }
@@ -731,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_eviction_probability() {
-        let prob = ProbStrategy::new(f16::from_f32_const(0.03125));
+        let prob = ProbStrategy::new();
 
         // Without wraparound
         let global_counter = 1000;
