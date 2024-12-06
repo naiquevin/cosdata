@@ -228,9 +228,9 @@ where
                 strategy: evict_strategy,
                 trigger: EvictionTrigger::Always,
             },
-            EvictionStrategy::Probabilistic(strat) => EvictionKind::Foreground {
+            EvictionStrategy::Probabilistic(s) => EvictionKind::Foreground {
                 strategy: evict_strategy,
-                trigger: EvictionTrigger::Probabilistic { prob: strat.prob },
+                trigger: EvictionTrigger::Probabilistic { prob: s.prob },
             },
         };
         let obj = LRUCache {
@@ -350,11 +350,11 @@ where
                             self.evict_oldest()
                         }
                         (
-                            EvictionStrategy::Probabilistic(prob_strat),
+                            EvictionStrategy::Probabilistic(prob_strategy),
                             EvictionTrigger::Probabilistic { prob },
                         ) => {
                             if trigger.should_trigger() {
-                                self.evict_fg_probabilistic(prob_strat, prob)
+                                self.evict_fg_probabilistic(prob_strategy, prob)
                             }
                         }
                         // Rest of the cases are not supported
