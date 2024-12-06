@@ -4,6 +4,8 @@ use rand::Rng;
 use std::iter::Iterator;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, sleep};
+use std::time::Duration;
 
 // Calculates counter age, while considering a possibility of
 // wraparound (with the assumption that wraparound will happen at most
@@ -126,6 +128,7 @@ pub enum EvictionStrategy {
     Probabilistic(ProbStrategy),
 }
 
+#[derive(Clone)]
 enum EvictionTrigger {
     Always,
 
@@ -147,6 +150,7 @@ impl EvictionTrigger {
 }
 
 #[allow(unused)]
+#[derive(Clone)]
 enum EvictionKind {
     Foreground {
         strategy: EvictionStrategy,
@@ -154,7 +158,9 @@ enum EvictionKind {
     },
     Background {
         strategy: EvictionStrategy,
-        max_batch_size: u16,
+        // @TODO: Change to u16. That requires changes to the KeyIndex
+        // as well
+        max_batch_size: u8,
         interval: u8,
         lock: Arc<Mutex<()>>,
     },
@@ -169,19 +175,26 @@ impl EvictionKind {
     }
 }
 
+#[derive(Clone)]
 pub struct LRUCache<K, V>
 where
-    K: Eq + std::hash::Hash + Clone + Into<u64> + From<u64>,
-    V: Clone,
+    // @NOTE: 'static bound is added for now for the generic
+    // parameters so that they live long enough in the background
+    // thread. Even though the code compiles and the existing tests
+    // pass, not sure if there's a better approach.
+    //
+    // @TODO: Check if we can avoid the 'static bound
+    K: Eq + std::hash::Hash + Clone + Into<u64> + From<u64> + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     // Store value and counter value
-    map: DashMap<K, (V, u32)>,
+    map: Arc<DashMap<K, (V, u32)>>,
     capacity: usize,
     // Global counter
-    counter: AtomicU32,
+    counter: Arc<AtomicU32>,
     eviction_kind: EvictionKind,
-    index: Option<KeyIndex>,
-    evict_hook: Option<fn(&V)>,
+    index: Option<Arc<KeyIndex>>,
+    evict_hook: Option<Arc<fn(&V)>>,
 }
 
 /// Wrapper for the value that's returned from the LRUCache when
@@ -203,13 +216,13 @@ impl<V> CachedValue<V> {
 
 impl<K, V> LRUCache<K, V>
 where
-    K: Eq + std::hash::Hash + Clone + Into<u64> + From<u64>,
-    V: Clone,
+    K: Eq + std::hash::Hash + Clone + Into<u64> + From<u64> + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     pub fn new(capacity: usize, evict_strategy: EvictionStrategy) -> Self {
         let index = match &evict_strategy {
             EvictionStrategy::Deterministic => None,
-            EvictionStrategy::Probabilistic(_) => Some(KeyIndex::new()),
+            EvictionStrategy::Probabilistic(_) => Some(Arc::new(KeyIndex::new())),
         };
         // @NOTE: Code for backward compatibility
         let eviction_kind = match evict_strategy.clone() {
@@ -228,14 +241,18 @@ where
                 }
             },
         };
-        LRUCache {
-            map: DashMap::new(),
-            counter: AtomicU32::new(0),
+        let obj = LRUCache {
+            map: Arc::new(DashMap::new()),
+            counter: Arc::new(AtomicU32::new(0)),
             evict_hook: None,
             index,
             eviction_kind,
             capacity,
-        }
+        };
+        // Doesn't work yet but the code compiles
+        //
+        // obj.setup_bg_prob_eviction();
+        obj
     }
 
     // Constructs a new LRUCache with probabilistic eviction strategy
@@ -245,7 +262,7 @@ where
     }
 
     pub fn set_evict_hook(&mut self, hook: Option<fn(&V)>) {
-        self.evict_hook = hook;
+        self.evict_hook = hook.map(Arc::new);
     }
 
     /// Returns an entry from the cache
@@ -380,9 +397,9 @@ where
             // If item didn't exist it will return None. This can
             // happen if another thread finds the same item to evict
             // and "wins". This implies for temporarily the dashmap
-            // size could exceed max capacity. It's fine for now but
+            // size could exceed max capacity. Is fine for now but
             // needs to be fixed.
-            if let Some(evict_hook) = self.evict_hook {
+            if let Some(evict_hook) = &self.evict_hook {
                 evict_hook(&value);
             }
             let removed = self.map.remove(&key);
@@ -422,12 +439,78 @@ where
                 }
             }
             for (idx, key, value) in pairs_to_evict {
-                if let Some(evict_hook) = self.evict_hook {
+                if let Some(evict_hook) = &self.evict_hook {
                     evict_hook(&value)
                 }
                 self.map.remove(&key);
                 index.remove(idx);
             }
+        }
+    }
+
+    #[allow(unused)]
+    fn setup_bg_prob_eviction(&self) {
+        let num_to_evict = std::cmp::max(self.map.len() - self.capacity, 0) as u8;
+        let this = self.clone();
+        if num_to_evict > 0 {
+            thread::spawn(move || {
+                // Ensure that eviction kind is background and strategy is probabilistic
+                let (strat, max_batch_size, interval, lock) = match &this.eviction_kind {
+                    EvictionKind::Background { strategy, max_batch_size, interval, lock } => {
+                        match strategy {
+                            EvictionStrategy::Probabilistic(prob_strat) => {
+                                (prob_strat, max_batch_size, interval, lock)
+                            },
+                            _ => unreachable!(),
+                        }
+                    },
+                    _ => unreachable!(),
+                };
+                let interval = Duration::new(1, 0);
+                let batch_size = std::cmp::min(num_to_evict, *max_batch_size);
+                let mut num_evicted = 0;
+                loop {
+                    let guard = lock.lock();
+                    let global_counter = this.counter.load(Ordering::SeqCst);
+                    let mut pairs_to_evict = Vec::with_capacity(batch_size as usize);
+                    // @NOTE: Safe use of unwrap as we are ensuring that the
+                    // key index is enabled in case of prob eviction strategy
+                    // (See the `new` method).
+                    let index = this.index.as_ref().unwrap();
+                    // @TODO: What if num_to_evict is > 256?
+                    for (idx, key) in index.get_keys(num_to_evict as u8) {
+                        if pairs_to_evict.len() as u8 >= batch_size {
+                            break;
+                        }
+                        if let Some(entry) = this.map.get(&K::from(key)) {
+                            let (key, (value, counter_val)) = entry.pair();
+                            if strat.should_evict(global_counter, *counter_val) {
+                                // @NOTE: We need to collect the pairs in a
+                                // vector and remove the keys from the dashmap
+                                // later whereas values are used for calling
+                                // `evict_hook` (if specified). Directly
+                                // calling the `remove` method here causes a
+                                // deadlock because of the existing reference
+                                // into the dashmap. See `DashMap.remove` docs
+                                // for more info.
+                                pairs_to_evict.push((idx, key.clone(), value.clone()));
+                            }
+                        }
+                    }
+                    for (idx, key, value) in pairs_to_evict {
+                        if let Some(evict_hook) = &this.evict_hook {
+                            evict_hook(&value)
+                        }
+                        this.map.remove(&key);
+                        index.remove(idx);
+                        num_evicted += 1;
+                    }
+
+                    if num_evicted == num_to_evict {
+                        sleep(interval);
+                    }
+                }
+            });
         }
     }
 

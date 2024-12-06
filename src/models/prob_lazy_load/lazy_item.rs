@@ -30,6 +30,9 @@ pub enum ProbLazyItemState<T> {
     },
 }
 
+unsafe impl<T> Send for ProbLazyItemState<T> {}
+unsafe impl<T> Sync for ProbLazyItemState<T> {}
+
 impl<T> ProbLazyItemState<T> {
     pub fn get_version_number(&self) -> u16 {
         match self {
@@ -56,6 +59,9 @@ pub struct ProbLazyItemInner<T> {
 pub struct ProbLazyItem<T> {
     inner: NonNull<ProbLazyItemInner<T>>,
 }
+
+unsafe impl<T> Send for ProbLazyItem<T> {}
+unsafe impl<T> Sync for ProbLazyItem<T> {}
 
 impl<T> Clone for ProbLazyItem<T> {
     #[inline(always)]
