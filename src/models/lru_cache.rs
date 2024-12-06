@@ -129,7 +129,7 @@ pub enum EvictionStrategy {
 }
 
 #[derive(Clone)]
-enum EvictionTrigger {
+pub enum EvictionTrigger {
     Always,
 
     // `prob` indicates probability of eviction getting
@@ -149,7 +149,7 @@ impl EvictionTrigger {
 
 #[allow(unused)]
 #[derive(Clone)]
-enum EvictionKind {
+pub enum EvictionKind {
     Foreground {
         strategy: EvictionStrategy,
         trigger: EvictionTrigger,
@@ -165,6 +165,13 @@ enum EvictionKind {
 }
 
 impl EvictionKind {
+    pub fn immediate() -> Self {
+        Self::Foreground {
+            strategy: EvictionStrategy::Deterministic,
+            trigger: EvictionTrigger::Always,
+        }
+    }
+
     fn is_fg(&self) -> bool {
         match self {
             Self::Foreground { .. } => true,
@@ -217,21 +224,22 @@ where
     K: Eq + std::hash::Hash + Clone + Into<u64> + From<u64> + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
-    pub fn new(capacity: usize, evict_strategy: EvictionStrategy) -> Self {
-        let index = match &evict_strategy {
-            EvictionStrategy::Deterministic => None,
-            EvictionStrategy::Probabilistic(_) => Some(Arc::new(KeyIndex::new())),
-        };
-        // @NOTE: Code for backward compatibility
-        let eviction_kind = match evict_strategy.clone() {
-            EvictionStrategy::Deterministic => EvictionKind::Foreground {
-                strategy: evict_strategy,
-                trigger: EvictionTrigger::Always,
-            },
-            EvictionStrategy::Probabilistic(s) => EvictionKind::Foreground {
-                strategy: evict_strategy,
-                trigger: EvictionTrigger::Probabilistic { prob: s.prob },
-            },
+    pub fn new(capacity: usize, eviction_kind: EvictionKind) -> Self {
+        let index = match &eviction_kind {
+            EvictionKind::Foreground { strategy, .. } => {
+                if let EvictionStrategy::Probabilistic(_) = strategy {
+                    Some(Arc::new(KeyIndex::new()))
+                } else {
+                    None
+                }
+            }
+            EvictionKind::Background { strategy, .. } => {
+                if let EvictionStrategy::Probabilistic(_) = strategy {
+                    Some(Arc::new(KeyIndex::new()))
+                } else {
+                    None
+                }
+            }
         };
         let obj = LRUCache {
             map: Arc::new(DashMap::new()),
@@ -249,9 +257,14 @@ where
 
     // Constructs a new LRUCache with probabilistic eviction strategy
     pub fn with_prob_eviction(capacity: usize, prob: f32) -> Self {
-        let strategy =
-            EvictionStrategy::Probabilistic(ProbStrategy::new(f16::from_f32_const(prob)));
-        Self::new(capacity, strategy)
+        let trigger_prob = f16::from_f32_const(prob);
+        let eviction_kind = EvictionKind::Foreground {
+            strategy: EvictionStrategy::Probabilistic(ProbStrategy::new(trigger_prob)),
+            trigger: EvictionTrigger::Probabilistic {
+                prob: trigger_prob,
+            }
+        };
+        Self::new(capacity, eviction_kind)
     }
 
     pub fn set_evict_hook(&mut self, hook: Option<fn(&V)>) {
@@ -552,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_basic_usage() {
-        let cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionStrategy::Deterministic);
+        let cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionKind::immediate());
 
         cache.insert(1, "value1");
         cache.insert(2, "value2");
@@ -579,7 +592,7 @@ mod tests {
 
     #[test]
     fn test_get_or_insert() {
-        let cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionStrategy::Deterministic);
+        let cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionKind::immediate());
 
         // Insert two values using `try_insert_with`, verifying that
         // the method returns the correct value
@@ -627,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_conc_get_or_insert() {
-        let inner: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionStrategy::Deterministic);
+        let inner: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionKind::immediate());
         let cache = Arc::new(inner);
 
         // Try concurrently inserting the same entry from 2 threads
@@ -700,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_values_iterator() {
-        let cache: LRUCache<u64, &'static str> = LRUCache::new(4, EvictionStrategy::Deterministic);
+        let cache: LRUCache<u64, &'static str> = LRUCache::new(4, EvictionKind::immediate());
 
         cache.insert(1, "value1");
         cache.insert(2, "value2");
@@ -849,8 +862,7 @@ mod tests {
 
     #[test]
     fn test_evict_hook() {
-        let mut cache: LRUCache<u64, &'static str> =
-            LRUCache::new(2, EvictionStrategy::Deterministic);
+        let mut cache: LRUCache<u64, &'static str> = LRUCache::new(2, EvictionKind::immediate());
         cache.set_evict_hook(Some(|&value| {
             assert_eq!("value2", value);
         }));
