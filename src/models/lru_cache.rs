@@ -128,17 +128,17 @@ pub enum EvictionStrategy {
 pub enum EvictionTrigger {
     Always,
 
-    // `prob` indicates probability of eviction getting
+    // The data represents probability of eviction getting
     // triggered. E.g. A value of 0.1 means eviction will be randomly
     // triggered with 10% probability on each call
-    Probabilistic { prob: f16 },
+    Probabilistic(f16),
 }
 
 impl EvictionTrigger {
     fn should_trigger(&self) -> bool {
         match self {
             Self::Always => true,
-            Self::Probabilistic { prob } => *prob > f16::from_f32(rand::thread_rng().gen()),
+            Self::Probabilistic(prob) => *prob > f16::from_f32(rand::thread_rng().gen()),
         }
     }
 }
@@ -256,9 +256,7 @@ where
         let trigger_prob = f16::from_f32_const(prob);
         let eviction_kind = EvictionKind::Foreground {
             strategy: EvictionStrategy::Probabilistic(ProbStrategy::new()),
-            trigger: EvictionTrigger::Probabilistic {
-                prob: trigger_prob,
-            }
+            trigger: EvictionTrigger::Probabilistic(trigger_prob),
         };
         Self::new(capacity, eviction_kind)
     }
@@ -360,7 +358,7 @@ where
                         }
                         (
                             EvictionStrategy::Probabilistic(prob_strategy),
-                            EvictionTrigger::Probabilistic { prob },
+                            EvictionTrigger::Probabilistic(prob),
                         ) => {
                             if trigger.should_trigger() {
                                 self.evict_fg_probabilistic(prob_strategy, prob)
