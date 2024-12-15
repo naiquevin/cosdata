@@ -256,42 +256,42 @@ where
     }
 
     fn evict(&self) {
-        if self.map.len() > self.capacity {
-            match &self.evict_strategy {
-                EvictStrategy::Immediate => self.evict_lru(),
-                EvictStrategy::Probabilistic(prob) => {
-                    if self.map.len() > self.capacity && prob.should_trigger() {
-                        self.evict_lru_probabilistic(&prob);
-                    }
+        match &self.evict_strategy {
+            EvictStrategy::Immediate => self.evict_lru(),
+            EvictStrategy::Probabilistic(prob) => {
+                if prob.should_trigger() {
+                    self.evict_lru_probabilistic(&prob);
                 }
             }
         }
     }
 
     fn evict_lru(&self) {
-        let mut oldest_pair = None;
-        let mut oldest_counter = u32::MAX;
+        if self.map.len() > self.capacity {
+            let mut oldest_pair = None;
+            let mut oldest_counter = u32::MAX;
 
-        for entry in self.map.iter() {
-            let (key, (value, counter_val)) = entry.pair();
-            if *counter_val < oldest_counter {
-                oldest_counter = *counter_val;
-                oldest_pair = Some((key.clone(), value.clone()));
+            for entry in self.map.iter() {
+                let (key, (value, counter_val)) = entry.pair();
+                if *counter_val < oldest_counter {
+                    oldest_counter = *counter_val;
+                    oldest_pair = Some((key.clone(), value.clone()));
+                }
             }
-        }
 
-        if let Some((key, value)) = oldest_pair {
-            // If item didn't exist it will return None. This can
-            // happen if another thread finds the same item to evict
-            // and "wins". This implies for temporarily the dashmap
-            // size could exceed max capacity. It's fine for now but
-            // needs to be fixed.
-            if let Some(evict_hook) = self.evict_hook {
-                evict_hook(&value);
-            }
-            let removed = self.map.remove(&key);
-            if removed.is_none() {
-                log::warn!("Item already evicted by another thread");
+            if let Some((key, value)) = oldest_pair {
+                // If item didn't exist it will return None. This can
+                // happen if another thread finds the same item to evict
+                // and "wins". This implies for temporarily the dashmap
+                // size could exceed max capacity. It's fine for now but
+                // needs to be fixed.
+                if let Some(evict_hook) = self.evict_hook {
+                    evict_hook(&value);
+                }
+                let removed = self.map.remove(&key);
+                if removed.is_none() {
+                    log::warn!("Item already evicted by another thread");
+                }
             }
         }
     }
