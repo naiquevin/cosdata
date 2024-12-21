@@ -2,7 +2,7 @@ use std::{
     cell::Cell,
     ops::Deref,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
+    sync::{atomic::{AtomicBool, AtomicPtr, Ordering}, Arc},
 };
 
 use crate::models::{
@@ -49,7 +49,7 @@ impl<T> ProbLazyItemState<T> {
 // The actual "lazy item", not used directly, instead a pointer (`*mut ProbLazyItemInner<T>`) or
 // wrapper (`ProbLazyItem<T>`) is passed around and stored.
 pub struct ProbLazyItemInner<T> {
-    state: AtomicPtr<ProbLazyItemState<T>>,
+    state: AtomicPtr<Arc<ProbLazyItemState<T>>>,
 }
 
 // Just a convenient wrapper for `*mut ProbLazyItemInner<T>`
@@ -60,7 +60,7 @@ pub struct ProbLazyItem<T> {
 impl<T> Clone for ProbLazyItem<T> {
     #[inline(always)]
     fn clone(&self) -> Self {
-        Self { inner: self.inner }
+        Self { inner: self.inner.clone() }
     }
 }
 
@@ -74,18 +74,20 @@ impl<T> ProbLazyItem<T> {
     }
 
     pub fn new(data: T, version_id: Hash, version_number: u16) -> Self {
+        let state = ProbLazyItemState::Ready {
+            data,
+            file_offset: Cell::new(None),
+            persist_flag: AtomicBool::new(true),
+            version_id,
+            version_number,
+        };
+        let raw_ptr = Box::into_raw(Box::new(Arc::new(state)));
         Self::from_inner(ProbLazyItemInner {
-            state: AtomicPtr::new(Box::into_raw(Box::new(ProbLazyItemState::Ready {
-                data,
-                file_offset: Cell::new(None),
-                persist_flag: AtomicBool::new(true),
-                version_id,
-                version_number,
-            }))),
+            state: AtomicPtr::new(raw_ptr),
         })
     }
 
-    pub fn new_from_state(state: ProbLazyItemState<T>) -> Self {
+    pub fn new_from_state(state: Arc<ProbLazyItemState<T>>) -> Self {
         Self::from_inner(ProbLazyItemInner {
             state: AtomicPtr::new(Box::into_raw(Box::new(state))),
         })
@@ -106,10 +108,12 @@ impl<T> ProbLazyItem<T> {
     // }
 
     pub fn new_pending(file_index: FileIndex) -> Self {
+        let state = ProbLazyItemState::Pending {
+            file_index,
+        };
+        let raw_ptr = Box::into_raw(Box::new(Arc::new(state)));
         Self::from_inner(ProbLazyItemInner {
-            state: AtomicPtr::new(Box::into_raw(Box::new(ProbLazyItemState::Pending {
-                file_index,
-            }))),
+            state: AtomicPtr::new(raw_ptr),
         })
     }
 
@@ -141,7 +145,7 @@ impl<T> ProbLazyItemInner<T> {
         unsafe { &*self.state.load(Ordering::Acquire) }
     }
 
-    pub fn set_state(&self, new_state: ProbLazyItemState<T>) {
+    pub fn set_state(&self, new_state: Arc<ProbLazyItemState<T>>) {
         let old_state = self
             .state
             .swap(Box::into_raw(Box::new(new_state)), Ordering::SeqCst);
@@ -153,8 +157,9 @@ impl<T> ProbLazyItemInner<T> {
 
     pub fn is_ready(&self) -> bool {
         unsafe {
+            let state_arc = &*self.state.load(Ordering::Acquire);
             matches!(
-                &*self.state.load(Ordering::Acquire),
+                **state_arc,
                 ProbLazyItemState::Ready { .. }
             )
         }
@@ -162,8 +167,9 @@ impl<T> ProbLazyItemInner<T> {
 
     pub fn is_pending(&self) -> bool {
         unsafe {
+            let state_arc = &*self.state.load(Ordering::Acquire);
             matches!(
-                &*self.state.load(Ordering::Acquire),
+                **state_arc,
                 ProbLazyItemState::Pending { .. }
             )
         }
@@ -171,21 +177,23 @@ impl<T> ProbLazyItemInner<T> {
 
     pub fn get_lazy_data<'a>(&self) -> Option<&'a T> {
         unsafe {
-            match &*self.state.load(Ordering::Acquire) {
+            let state_arc = &*self.state.load(Ordering::Acquire);
+            match **state_arc {
                 ProbLazyItemState::Pending { .. } => None,
-                ProbLazyItemState::Ready { data, .. } => Some(&data),
+                ProbLazyItemState::Ready { ref data, .. } => Some(&data),
             }
         }
     }
 
     pub fn get_file_index(&self) -> Option<FileIndex> {
         unsafe {
-            match &*self.state.load(Ordering::Acquire) {
-                ProbLazyItemState::Pending { file_index } => Some(file_index.clone()),
+            let state_arc = &*self.state.load(Ordering::Acquire);
+            match **state_arc {
+                ProbLazyItemState::Pending { ref file_index } => Some(file_index.clone()),
                 ProbLazyItemState::Ready {
-                    file_offset,
-                    version_id,
-                    version_number,
+                    ref file_offset,
+                    ref version_id,
+                    ref version_number,
                     ..
                 } => file_offset.get().map(|offset| FileIndex::Valid {
                     offset,
@@ -198,8 +206,8 @@ impl<T> ProbLazyItemInner<T> {
 
     pub fn set_file_offset(&self, new_file_offset: FileOffset) {
         unsafe {
-            if let ProbLazyItemState::Ready { file_offset, .. } =
-                &*self.state.load(Ordering::Acquire)
+            let state_arc = &*self.state.load(Ordering::Acquire);
+            if let ProbLazyItemState::Ready { ref file_offset, .. } = **state_arc
             {
                 file_offset.set(Some(new_file_offset));
             }
@@ -210,8 +218,9 @@ impl<T> ProbLazyItemInner<T> {
 impl ProbLazyItem<ProbNode> {
     pub fn try_get_data<'a>(&self, cache: &ProbCache) -> Result<&'a ProbNode, BufIoError> {
         unsafe {
-            match &*self.state.load(Ordering::Acquire) {
-                ProbLazyItemState::Ready { data, .. } => Ok(data),
+            let state_arc = &*self.state.load(Ordering::Acquire);
+            match **state_arc {
+                ProbLazyItemState::Ready { ref data, .. } => Ok(data),
                 ProbLazyItemState::Pending { file_index } => {
                     cache.get_object(file_index.clone())?.try_get_data(cache)
                 }
@@ -319,8 +328,8 @@ impl ProbLazyItem<ProbNode> {
 impl<T> SyncPersist for ProbLazyItemInner<T> {
     fn set_persistence(&self, flag: bool) {
         unsafe {
-            if let ProbLazyItemState::Ready { persist_flag, .. } =
-                &*self.state.load(Ordering::Acquire)
+            let state_arc = &*self.state.load(Ordering::Acquire);
+            if let ProbLazyItemState::Ready { ref persist_flag, .. } = **state_arc
             {
                 persist_flag.store(flag, Ordering::SeqCst);
             }
@@ -329,8 +338,8 @@ impl<T> SyncPersist for ProbLazyItemInner<T> {
 
     fn needs_persistence(&self) -> bool {
         unsafe {
-            if let ProbLazyItemState::Ready { persist_flag, .. } =
-                &*self.state.load(Ordering::Acquire)
+            let state_arc = &*self.state.load(Ordering::Acquire);
+            if let ProbLazyItemState::Ready { ref persist_flag, .. } = **state_arc
             {
                 persist_flag.load(Ordering::SeqCst)
             } else {
