@@ -148,9 +148,7 @@ impl HNSWIndex {
 
     /// Returns FileIndex (offset) corresponding to the pseudo root node.
     pub fn pseudo_root_vec_offset(&self) -> Option<FileIndex> {
-        let node = unsafe {
-            self.get_pseudo_root_vec().map(|node| &*node)
-        };
+        let node = unsafe { self.get_pseudo_root_vec().map(|node| &*node) };
         node.map(|n| n.file_index)
     }
 }
