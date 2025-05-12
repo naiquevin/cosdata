@@ -754,18 +754,21 @@ impl CollectionsMap {
         let mut pending_items = FxHashMap::default();
 
         let file_index = hnsw_index_data.file_index;
-        let bufman = index_manager.get(file_index.file_id)?;
-        let cursor = bufman.open_cursor()?;
-        let root_node_raw = ProbNode::deserialize_raw(
-            &bufman,
-            cursor,
-            file_index.offset,
-            file_index.file_id,
-            &cache,
-        )?;
-        let root_node = ProbNode::build_from_raw(root_node_raw, &cache, &mut pending_items);
-        let root = ProbLazyItem::new(root_node, file_index.file_id, file_index.offset);
-        bufman.close_cursor(cursor)?;
+        let root =
+            ProbLazyItem::from_file_index(&file_index, &index_manager, &cache, &mut pending_items)?;
+
+        let pseudo_root = match hnsw_index_data.file_index_pseudo {
+            Some(file_index) => {
+                let node = ProbLazyItem::from_file_index(
+                    &file_index,
+                    &index_manager,
+                    &cache,
+                    &mut pending_items,
+                )?;
+                Some(node)
+            }
+            None => None,
+        };
 
         let (file_index_sender, file_index_receiver) = channel::unbounded::<FileIndex>();
         let (raw_node_sender, raw_node_receiver) =
@@ -838,6 +841,7 @@ impl CollectionsMap {
 
         let hnsw_index = HNSWIndex::new(
             root,
+            pseudo_root,
             hnsw_index_data.levels_prob,
             hnsw_index_data.dim,
             hnsw_index_data.quantization_metric,

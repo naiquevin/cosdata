@@ -7,15 +7,17 @@ use std::{
 };
 
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     indexes::hnsw::offset_counter::IndexFileId,
     models::{
-        buffered_io::BufIoError,
+        buffered_io::{BufIoError, BufferManagerFactory},
         cache_loader::{HNSWIndexCache, InvertedIndexCache, TFIDFIndexCache},
         inverted_index::InvertedIndexNodeData,
-        prob_node::ProbNode,
+        prob_node::{ProbNode, SharedNode},
+        serializer::hnsw::RawDeserialize,
         tf_idf_index::TFIDFIndexNodeData,
         types::FileOffset,
     },
@@ -167,6 +169,35 @@ impl ProbLazyItem<ProbNode> {
         } else {
             root
         })
+    }
+
+    /// Creates a ProbLazyItem from the file index and returns a raw
+    /// pointer to it.
+    ///
+    /// Additional arguments, `index_manager`, `cache` and
+    /// `pending_items` are required for loading data.
+    pub fn from_file_index(
+        file_index: &FileIndex,
+        index_manager: &BufferManagerFactory<IndexFileId>,
+        cache: &HNSWIndexCache,
+        pending_items: &mut FxHashMap<FileIndex, SharedNode>,
+    ) -> Result<*mut Self, BufIoError> {
+        let bufman = index_manager.get(file_index.file_id)?;
+        let cursor = bufman.open_cursor()?;
+        let root_node_raw = ProbNode::deserialize_raw(
+            &bufman,
+            cursor,
+            file_index.offset,
+            file_index.file_id,
+            cache,
+        )?;
+        let root_node = ProbNode::build_from_raw(root_node_raw, cache, pending_items);
+        bufman.close_cursor(cursor)?;
+        Ok(ProbLazyItem::new(
+            root_node,
+            file_index.file_id,
+            file_index.offset,
+        ))
     }
 }
 
