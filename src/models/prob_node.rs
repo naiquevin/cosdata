@@ -13,7 +13,10 @@ use super::{
     cache_loader::HNSWIndexCache,
     prob_lazy_load::lazy_item::{FileIndex, ProbLazyItem},
     serializer::hnsw::RawDeserialize,
-    types::{DistanceMetric, HNSWLevel, InternalId, MetricResult, NodePropMetadata, NodePropValue},
+    types::{
+        DistanceMetric, HNSWLevel, InternalId, MetricResult, NodePropMetadata, NodePropValue,
+        ReplicaNodeKind, VectorData,
+    },
     versioning::VersionHash,
 };
 
@@ -369,6 +372,18 @@ impl ProbNode {
             root_tag,
             *cache.distance_metric.read().unwrap(),
         )
+    }
+
+    /// Returns the kind of node it is
+    pub fn replica_node_kind(&self) -> ReplicaNodeKind {
+        let metadata = self.prop_metadata.as_ref().map(|pm| &*pm.vec);
+        let internal_id = self.get_id();
+        let vector_data = VectorData {
+            id: Some(&internal_id),
+            quantized_vec: &self.prop_value.vec,
+            metadata,
+        };
+        vector_data.replica_node_kind()
     }
 }
 
