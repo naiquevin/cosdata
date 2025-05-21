@@ -176,7 +176,7 @@ fn gen_combinations(vs: &Vec<Vec<u16>>) -> Vec<Vec<u16>> {
 /// The caller must ensure that `num_pseudo_nodes` is not equal to 0,
 /// otherwise this fn will panic.
 pub fn pseudo_level_probs(num_levels: u8, num_pseudo_nodes: u16) -> Vec<(f64, u8)> {
-    // @NOTE: It's ok to case u32 to u8 below as log to the base 10 of
+    // @NOTE: It's ok to cast u32 to u8 below as log to the base 10 of
     // u16::MAX is only 4.
     let mut num_higher_levels = (num_pseudo_nodes.ilog10() + 1) as u8;
     // Find lower levels, handling the case where `num_higher_levels`

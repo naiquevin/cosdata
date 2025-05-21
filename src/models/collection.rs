@@ -102,6 +102,8 @@ pub struct Collection {
     pub current_version: RwLock<VersionHash>,
     pub current_open_transaction: RwLock<Option<CollectionTransaction>>,
     pub vcs: VersionControl,
+    // @TODO(vineet): Performance concerns when multiple `InternalId`s
+    // are mapped to the same `RawVectorEmbedding`
     pub internal_to_external_map: TreeMap<InternalId, RawVectorEmbedding>,
     pub external_to_internal_map: TreeMap<VectorId, InternalId>,
     pub document_to_internals_map: TreeMapVec<DocumentId, InternalId>,
@@ -314,9 +316,15 @@ impl Collection {
         transaction: &BackgroundCollectionTransaction,
         config: &Config,
     ) -> Result<(), WaCustomError> {
+        let num_nodes_per_emb = if let Some(hnsw_index) = &*self.hnsw_index.read() {
+            hnsw_index.max_replica_per_node as usize
+        } else {
+            1
+        };
+        let num_ids_to_reserve = embeddings.len() * num_nodes_per_emb;
         let id_start = self
             .internal_id_counter
-            .fetch_add(embeddings.len() as u32, Ordering::Relaxed);
+            .fetch_add(num_ids_to_reserve as u32, Ordering::Relaxed);
 
         let (dense_embs, sparse_embs, tf_idf_embs): (Vec<_>, Vec<_>, Vec<_>) =
             embeddings.into_iter().enumerate().fold(
@@ -331,7 +339,7 @@ impl Collection {
                         text,
                     } = embedding.clone();
 
-                    let internal_id = InternalId::from(id_start + i as u32);
+                    let internal_id = InternalId::from(id_start + (i * num_nodes_per_emb) as u32);
 
                     if let Some(values) = dense_values {
                         acc.0

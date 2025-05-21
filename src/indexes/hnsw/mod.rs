@@ -163,6 +163,8 @@ impl IndexOps for HNSWIndex {
     type Data = HNSWIndexData;
 
     fn validate_embedding(&self, embedding: Self::IndexingInput) -> Result<(), WaCustomError> {
+        // @TODO(vineet): Add validation for metadata fields (if
+        // applicable)
         if embedding.1.len() == self.dim {
             Ok(())
         } else {

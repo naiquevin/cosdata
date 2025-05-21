@@ -385,7 +385,9 @@ pub fn finalize_ann_results(
         let raw_emb = collection
             .internal_to_external_map
             .get_latest(&orig_id)
-            .ok_or_else(|| WaCustomError::NotFound("raw embedding not found".to_string()))?;
+            .ok_or_else(|| {
+                WaCustomError::NotFound(format!("raw embedding not found for id={orig_id:?}"))
+            })?;
         let dense_values = raw_emb.dense_values.as_ref().ok_or_else(|| {
             WaCustomError::NotFound("dense values not found for raw embedding".to_string())
         })?;
@@ -568,6 +570,7 @@ fn preprocess_embedding(
     hnsw_index: &HNSWIndex,
     quantization_metric: &RwLock<QuantizationMetric>,
     raw_emb: &RawDenseVectorEmbedding,
+    transaction_id: &VersionHash,
 ) -> Vec<IndexableEmbedding> {
     let quantization = quantization_metric.read().unwrap();
     let quantized_vec = Arc::new(
@@ -587,18 +590,6 @@ fn preprocess_embedding(
             .expect("failed to write prop");
     drop(prop_file_guard);
 
-    let base_id = if raw_emb.is_pseudo {
-        raw_emb.hash_vec
-    } else {
-        raw_emb.hash_vec * hnsw_index.max_replica_per_node as u32
-    };
-
-    let prop_value = Arc::new(NodePropValue {
-        id: base_id,
-        vec: quantized_vec.clone(),
-        location,
-    });
-
     let metadata_schema = collection.meta.metadata_schema.as_ref();
     let prop_file = &hnsw_index.cache.prop_file;
 
@@ -608,6 +599,12 @@ fn preprocess_embedding(
         // @TODO(vineet): This is hacky
         let num_levels = hnsw_index.levels_prob.len() - 1;
         let plp = pseudo_level_probs(num_levels as u8, replicas.len() as u16);
+
+        // As multiple pseudo nodes will be created for a single
+        // embedding, the raw embedding's internal id will be used as
+        // the base_id for calculating internal ids for other
+        // nodes.
+        let base_id = raw_emb.hash_vec;
         let mut embeddings: Vec<IndexableEmbedding> = vec![];
         for (replica_id, prop_metadata) in replicas.into_iter().enumerate() {
             let emb = IndexableEmbedding {
@@ -631,11 +628,36 @@ fn preprocess_embedding(
         .unwrap();
         match metadata_replicas {
             Some(replicas) => {
+                // As multiple replica nodes will be created for a
+                // single embedding, the raw embedding's internal id
+                // will be used as the base_id for calculating
+                // internal ids for other nodes. This works because
+                // when assigning the internal ids to input raw
+                // embeddings, the max no. of replicas per embedding
+                // have been considered. Refer to
+                // `Collection.index_embeddings` method.
+                let base_id = raw_emb.hash_vec;
+                // @TODO(vineet): Get rid of unwrap
+                let orig_emb = collection
+                    .internal_to_external_map
+                    .get_latest(&base_id)
+                    .unwrap();
                 let mut embeddings: Vec<IndexableEmbedding> = vec![];
                 for (replica_id, prop_metadata) in replicas.into_iter().enumerate() {
+                    let internal_id = InternalId::from(*base_id + replica_id as u32 + 1);
+                    collection.internal_to_external_map.insert(
+                        transaction_id.clone(),
+                        &internal_id,
+                        orig_emb.clone(),
+                    );
+                    collection.external_to_internal_map.insert(
+                        transaction_id.clone(),
+                        &orig_emb.id,
+                        internal_id.clone(),
+                    );
                     let emb = IndexableEmbedding {
                         prop_value: Arc::new(NodePropValue {
-                            id: InternalId::from(*base_id + replica_id as u32 + 1),
+                            id: internal_id,
                             vec: quantized_vec.clone(),
                             location,
                         }),
@@ -647,6 +669,11 @@ fn preprocess_embedding(
                 embeddings
             }
             None => {
+                let prop_value = Arc::new(NodePropValue {
+                    id: raw_emb.hash_vec,
+                    vec: quantized_vec.clone(),
+                    location,
+                });
                 let emb = IndexableEmbedding {
                     prop_value,
                     prop_metadata: None,
@@ -683,6 +710,7 @@ pub fn index_embeddings(
                 hnsw_index,
                 &hnsw_index.quantization_metric,
                 &emb,
+                &transaction.id,
             )
         })
         .collect::<Vec<IndexableEmbedding>>();
